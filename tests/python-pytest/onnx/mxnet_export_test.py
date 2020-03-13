@@ -24,6 +24,7 @@ import logging
 import tempfile
 from mxnet import nd, sym
 from mxnet.gluon import nn
+from mxnet.gluon import HybridBlock
 from mxnet.contrib import onnx as onnx_mxnet
 import mxnet as mx
 
@@ -77,6 +78,16 @@ def _check_onnx_export(net, group_outputs=False, shape_type=tuple, extra_params=
             mx.test_utils.assert_almost_equal(out, imp_out)
 
 
+class SplitConcatBlock(HybridBlock):
+    """Block which creates two splits and later concatenates them"""
+    def __init__(self, name):
+        super(SplitConcatBlock, self).__init__(name)
+
+    def hybrid_forward(self, F, x):
+        splits = F.split(x, axis=1, num_outputs=2)
+        return F.concat(*splits)
+
+
 class TestExport(unittest.TestCase):
     """ Tests ONNX export.
     """
@@ -115,6 +126,12 @@ class TestExport(unittest.TestCase):
         with net.name_scope():
             net.add(nn.Dense(100, activation='relu'), nn.Dense(10))
         _check_onnx_export(net, extra_params={'extra_param': nd.array([1, 2])})
+
+    def test_onnx_export_slice(self):
+        net = nn.HybridSequential(prefix='slice_net')
+        with net.name_scope():
+            net.add(nn.Dense(100, activation='relu'), SplitConcatBlock("splitConcat"), nn.Dense(10))
+        _check_onnx_export(net)
 
 
 if __name__ == '__main__':
