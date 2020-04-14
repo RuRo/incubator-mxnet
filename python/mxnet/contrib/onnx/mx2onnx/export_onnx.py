@@ -207,6 +207,13 @@ class MXNetGraph(object):
         graph_outputs = MXNetGraph.get_outputs(sym, params, in_shape, output_label)
         graph_shapes = MXNetGraph.get_outputs(sym.get_internals(), params, in_shape, output_label)
 
+        if verbose:
+            for node in mx_graph:
+                op = str(node['op'])
+                if op not in MXNetGraph.registry_:
+                    logging.warning("No conversion function registered for op type %s yet.", op)
+
+
         graph_input_idx = 0
         for idx, node in enumerate(mx_graph):
             op = node["op"]

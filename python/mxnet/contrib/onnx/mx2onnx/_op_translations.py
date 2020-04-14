@@ -1295,6 +1295,61 @@ def convert_full(node, **kwargs):
 
     return create_helper_tensor_node(data, name, kwargs)
 
+@mx_op.register("_arange")
+def convert_arange(node, **kwargs):
+    """Map MXNet's _arange operator attributes to onnx's
+    tensors and return the created node.
+    """
+    name, input_nodes, attrs = get_inputs(node, kwargs)
+    del input_nodes
+
+    start = eval(attrs.get("start", '0'))
+    stop = eval(attrs.get("stop", 'None'))
+    step = eval(attrs.get("step", '1'))
+
+    if eval(attrs.get("repeat", '1')) != 1:
+        raise NotImplementedError(
+            "Conversion of _arange nodes with repeat != 1 "
+            "to ONNX is currently not supported."
+        )
+
+    dtype = attrs.get('dtype')
+    data = np.arange(start, stop, step, dtype)
+
+    return create_helper_tensor_node(data, name, kwargs)
+
+@mx_op.register('zeros_like')
+@mx_op.register('ones_like')
+def convert_constant_like(node, **kwargs):
+    """Map MXNet's zeros_like and ones_like operators attributes
+    to onnx's Shape and Broadcast operators and return the created nodes.
+    """
+    # ToDo: Use Constant or ConstantOfShape, when Issue #15101 is resolved?
+    name, input_nodes, attrs = get_inputs(node, kwargs)
+    nodes = []
+
+    input_node = input_nodes[0]
+    input_shape = create_helper_shape_node(input_node, input_node + "__shape")
+    nodes.extend(input_shape)
+    input_shape = input_shape[-1].name
+
+    constant_value = np.array({
+        'zeros_like': 0.0,
+        'ones_like': 1.0,
+    }[node['op']], dtype=attrs.get('dtype', 'float32'))
+    constant_node = create_helper_tensor_node(
+        constant_value, name + "__constant", kwargs
+    )
+    nodes.extend(constant_node)
+    constant_node = constant_node[-1].name
+
+    expanded_constant_node = create_helper_expand_node(
+        constant_node, name, input_shape
+    )
+    nodes.extend(expanded_constant_node)
+
+    return nodes
+
 @mx_op.register("transpose")
 def convert_transpose(node, **kwargs):
     """Map MXNet's transpose operator attributes to onnx's Transpose operator
@@ -1449,6 +1504,12 @@ def scalar_op_helper(node, op_name, **kwargs):
                     new_initializer = numpy_helper.to_array(i) / scalar_value[0]
             elif op_name == 'Pow':
                 new_initializer = numpy_helper.to_array(i) ** scalar_value[0]
+            elif op_name == 'Less':
+                new_initializer = numpy_helper.to_array(i) < scalar_value[0]
+            elif op_name == 'Greater':
+                new_initializer = numpy_helper.to_array(i) > scalar_value[0]
+            elif op_name == 'Equal':
+                new_initializer = numpy_helper.to_array(i) == scalar_value[0]
             flag = False
             break
 
@@ -1483,6 +1544,9 @@ def scalar_op_helper(node, op_name, **kwargs):
 
         new_a_node = input_nodes[0] + str(kwargs["idx"])
         tensor_node = onnx.helper.make_tensor_value_info(new_a_node, data_type, dims)
+
+        if isinstance(new_initializer, np.ndarray):
+            new_initializer = new_initializer.flatten()
 
         initializer.append(
             onnx.helper.make_tensor(
@@ -1555,6 +1619,30 @@ def convert_pow_scalar(node, **kwargs):
     and return multiple created nodes.
     """
     return scalar_op_helper(node, 'Pow', **kwargs)
+
+@mx_op.register("_lesser_scalar")
+def convert_lesser_scalar(node, **kwargs):
+    """Map MXNet's _lesser_scalar operator attributes to onnx's Less operator.
+    Creates a new node for the input scalar value, adds it to the initializer
+    and return multiple created nodes.
+    """
+    return scalar_op_helper(node, 'Less', **kwargs)
+
+@mx_op.register("_greater_scalar")
+def convert_greater_scalar(node, **kwargs):
+    """Map MXNet's _greater_scalar operator attributes to onnx's Greater operator.
+    Creates a new node for the input scalar value, adds it to the initializer
+    and return multiple created nodes.
+    """
+    return scalar_op_helper(node, 'Greater', **kwargs)
+
+@mx_op.register("_equal_scalar")
+def convert_equal_scalar(node, **kwargs):
+    """Map MXNet's _equal_scalar operator attributes to onnx's Equal operator.
+    Creates a new node for the input scalar value, adds it to the initializer
+    and return multiple created nodes.
+    """
+    return scalar_op_helper(node, 'Equal', **kwargs)
 
 # Sorting and Searching
 @mx_op.register("argmax")
@@ -1920,6 +2008,60 @@ def convert_cast(node, **kwargs):
     return [node]
 
 
+@mx_op.register("slice_like")
+def convert_slice_like(node, **kwargs):
+    """Map MXNet's slice_like operator attributes to onnx's Slice operator
+    and return the created node.
+    """
+    name, input_nodes, attrs = get_inputs(node, kwargs)
+
+    export_nodes = []
+
+    data_node = input_nodes[0]
+    shape_like_node = input_nodes[1]
+    shape_node = create_helper_shape_node(
+        shape_like_node, shape_like_node + "__shape"
+    )
+    export_nodes.extend(shape_node)
+    shape_node = shape_node[-1].name
+
+    if "axes" in attrs:
+        axes = convert_string_to_list(attrs["axes"])
+        axes = np.asarray(axes, dtype=np.int)
+        axes_node = create_helper_tensor_node(axes, name + "__axes", kwargs)
+        export_nodes.extend(axes_node)
+        axes_node = axes_node[-1].name
+
+        shape_node = create_helper_gather_node(
+            shape_node,
+            shape_node + "__gathered",
+            axes,
+            kwargs
+        )
+        export_nodes.extend(shape_node)
+        shape_node = shape_node[-1].name
+
+        starts = np.zeros_like(axes, dtype=np.int)
+        starts_node = create_helper_tensor_node(starts, name + "__starts", kwargs)
+        export_nodes.extend(starts_node)
+        starts_node = starts_node[-1].name
+    else:
+        raise NotImplementedError(
+            "Conversion of slice_like nodes with implicit axes parameter "
+            "to ONNX is currently not supported."
+        )
+
+    node = onnx.helper.make_node(
+        "Slice",
+        [data_node, starts_node, shape_node, axes_node],
+        [name],
+        name=name,
+    )
+    export_nodes.extend([node])
+
+    return export_nodes
+
+
 @mx_op.register("slice_axis")
 def convert_slice_axis(node, **kwargs):
     """Map MXNet's slice_axis operator attributes to onnx's Slice operator
@@ -2043,6 +2185,13 @@ def convert_squeeze(node, **kwargs):
         name=name,
     )
     return [node]
+
+
+@mx_op.register("where")
+def convert_where(node, **kwargs):
+    """Map MXNet's Where operator attributes to onnx's Where operator.
+    """
+    return create_basic_op_node("Where", node, kwargs)
 
 
 @mx_op.register("log")
