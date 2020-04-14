@@ -207,12 +207,19 @@ class TestNode(unittest.TestCase):
                 npt.assert_almost_equal(np_out, mxnet_out, decimal=4)
 
     def test_exports(self):
-        input_shape = (2,1,3,1)
         for test in export_test_cases:
-            test_name, onnx_name, mx_op, attrs = test
+            test_name, onnx_name, mx_op, input_shape, attrs = test
             input_sym = mx.sym.var('data')
-            outsym = mx_op(input_sym, **attrs)
-            converted_model = onnx_mxnet.export_model(outsym, {}, [input_shape], np.float32,
+            if isinstance(mx_op, type) and issubclass(mx_op, (mx.gluon.HybridBlock, mx.gluon.SymbolBlock)):
+                mx_op = mx_op(**attrs)
+                mx_op.initialize()
+                mx_op(mx.nd.zeros(input_shape))
+                params = {k: v.data() for k, v in mx_op.collect_params().items()}
+                outsym = mx_op(input_sym)
+            else:
+                params = {}
+                outsym = mx_op(input_sym, **attrs)
+            converted_model = onnx_mxnet.export_model(outsym, params, [input_shape], np.float32,
                                                       onnx_file_path=outsym.name + ".onnx")
             model = load_model(converted_model)
             checker.check_model(model)
@@ -286,11 +293,14 @@ import_test_cases = [
     ("test_lpnormalization_ord2", "LpNormalization", [get_rnd([5, 3, 3, 2])], np.linalg.norm, {'ord':2, 'axis':1})
 ]
 
-# test_case = ("test_case_name", "ONNX_op_name", mxnet_op, attribute map)
+# test_case = ("test_case_name", "ONNX_op_name", mxnet_op, input_shape, attribute map)
 export_test_cases = [
-    ("test_expand", "Expand", mx.sym.broadcast_to, {'shape': (2,1,3,1)}),
-    ("test_tile", "Tile", mx.sym.tile, {'reps': (2,3)})
+    ("test_expand", "Expand", mx.sym.broadcast_to, (2,1,3,1), {'shape': (2,1,3,1)}),
+    ("test_tile", "Tile", mx.sym.tile, (2,1,3,1), {'reps': (2,3)}),
+    ("test_LSTM", "LSTM", mx.gluon.rnn.LSTM, (3,1,2), {'hidden_size': 3}),
+    ("test_BiLSTM", "LSTM", mx.gluon.rnn.LSTM, (3,1,2), {'hidden_size': 3, 'bidirectional': True})
 ]
+
 
 if __name__ == '__main__':
     unittest.main()
